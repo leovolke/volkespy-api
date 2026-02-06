@@ -1,7 +1,7 @@
 export default function handler(req, res) {
-    // 1) Configuração de CORS (Estrita: apenas POST/OPTIONS, sem Credentials)
+    // 1) Configuração de CORS (Atualizado para permitir GET)
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
     // 2) OPTIONS (Preflight)
@@ -10,15 +10,19 @@ export default function handler(req, res) {
         return;
     }
 
-    // 3) Rejeitar métodos diferentes de POST
-    if (req.method !== 'POST') {
+    // 3) Extração do email conforme o método
+    let rawEmail;
+
+    if (req.method === 'GET') {
+        rawEmail = req.query.email;
+    } else if (req.method === 'POST') {
+        const { email } = req.body || {};
+        rawEmail = email;
+    } else {
         return res.status(405).json({ error: 'Method Not Allowed' });
     }
 
-    // 4) Parse e Normalização
-    // Garantimos que body existe; extraímos email
-    const { email: rawEmail } = req.body || {};
-
+    // 4) Validação comum
     // Validação básica: string não vazia
     if (!rawEmail || typeof rawEmail !== 'string' || !rawEmail.trim()) {
         return res.status(200).json({ active: false, reason: "missing_email" });
@@ -30,7 +34,7 @@ export default function handler(req, res) {
     // 5) Allowlist (Normalizada)
     const allowedEmails = [
         "teste@volke.com",
-        "grupomercuryclub@gmail.com" // Substituído conforme solicitado
+        "grupomercuryclub@gmail.com"
     ].map(e => e.toLowerCase());
 
     // Verificar presença na lista
