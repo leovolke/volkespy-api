@@ -1,73 +1,95 @@
 // api/webhook.js
+import { Redis } from "@upstash/redis";
+
+const redis = Redis.fromEnv();
+
+// Chave padronizada no KV
+const keyForEmail = (email) => `volkespy:user:${String(email || "").trim().toLowerCase()}`;
+
+// Quais eventos liberam acesso
+const ACTIVATE_EVENTS = new Set([
+  "Purchase_Confirmed",
+  "Subscription_Active",
+  "Recurrent_Payment",
+  "Subscription_Renewal_Confirmed",
+  "Subscription_Product_Access",
+]);
+
+// Quais eventos cortam acesso
+const DEACTIVATE_EVENTS = new Set([
+  "Refund_Requested",
+  "Refund_Period_Over",
+  "Purchase_Canceled",
+  "Subscription_Canceled",
+  "Subscription_Expired",
+  "Purchase_Request_Expired",
+]);
+
 export default async function handler(req, res) {
-  // Só aceita POST
-  if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
-  }
-
   try {
-    const body = req.body || {};
+    // Lastlink normalmente envia POST
+    if (req.method !== "POST") {
+      return res.status(405).json({ ok: false, error: "Method not allowed" });
+    }
 
-    // ✅ LastLink (payload que você mostrou)
-    const email =
-      body?.Data?.Buyer?.Email ||
-      body?.data?.buyer?.email ||
-      body?.buyer?.email ||
-      body?.email;
+    // (Opcional, recomendado) Proteção por token:
+    // 1) Crie uma ENV na Vercel: LASTLINK_WEBHOOK_TOKEN = (o token que aparece na Lastlink)
+    // 2) Faça a Lastlink enviar esse token no header Authorization: Bearer <token>
+    // Se você não conseguir configurar header na Lastlink agora, comente este bloco.
+    const requiredToken = process.env.LASTLINK_WEBHOOK_TOKEN;
+    if (requiredToken) {
+      const auth = req.headers.authorization || "";
+      const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+      if (bearer !== requiredToken) {
+        return res.status(401).json({ ok: false, error: "Unauthorized" });
+      }
+    }
+
+    const payload = req.body || {};
+    const event = payload.Event;
+    const email = payload?.Data?.Buyer?.Email;
+
+    console.log("[WEBHOOK] Received event:", event);
+    console.log("[WEBHOOK] Buyer email:", email);
 
     if (!email) {
-      console.log("[WEBHOOK] Received:", JSON.stringify(body));
       console.log("[WEBHOOK] No email found");
       return res.status(400).json({ ok: false, error: "No email found" });
     }
 
-    const event = body?.Event || body?.event || "";
+    // Teste da Lastlink: você pode escolher ignorar ou processar
+    // Eu recomendo PROCESSAR mesmo em teste, mas marcando isTest no log.
+    const isTest = Boolean(payload.IsTest);
+    if (isTest) console.log("[WEBHOOK] IsTest = true");
 
-    // Regra simples:
-    // - eventos de aprovação/assinatura ativa = ativa
-    // - eventos de reembolso/cancelamento/chargeback = desativa
-    const deactivateEvents = new Set([
-      "Refund_Period_Over",
-      "Refunded",
-      "Chargeback",
-      "Chargeback_Started",
-      "Subscription_Canceled",
-      "Subscription_Expired",
-      "Subscription_Suspended",
-      "Subscription_Payment_Failed",
-    ]);
+    const key = keyForEmail(email);
 
-    const activateEvents = new Set([
-      "Purchase_Approved",
-      "Subscription_Activated",
-      "Subscription_Renewed",
-      "Payment_Confirmed",
-    ]);
-
-    let active = null;
-
-    if (deactivateEvents.has(event)) active = false;
-    if (activateEvents.has(event)) active = true;
-
-    // Se não reconhecer o evento, só loga e responde OK (pra não travar)
-    if (active === null) {
-      console.log("[WEBHOOK] Unhandled event:", event, "Email:", email);
-      return res.status(200).json({ ok: true, received: true, email, event });
+    if (ACTIVATE_EVENTS.has(event)) {
+      // Guarda dados úteis (pode expandir depois)
+      await redis.set(key, {
+        active: true,
+        source: "lastlink",
+        event,
+        updated_at: new Date().toISOString(),
+      });
+      console.log("[WEBHOOK] Activated:", email);
+      return res.status(200).json({ ok: true, active: true });
     }
 
-    // ✅ Aqui é o ponto: você liga/desliga o usuário.
-    // Como você está validando por email no /api/validate, o ideal é salvar em algum "banco".
-    // (se estiver usando JSON/arquivo simples por enquanto, troca aqui).
-    //
-    // Por enquanto, só confirmando que chegou certo:
-    console.log("[WEBHOOK] Email:", email, "Event:", event, "Set active:", active);
+    if (DEACTIVATE_EVENTS.has(event)) {
+      await redis.set(key, {
+        active: false,
+        source: "lastlink",
+        event,
+        updated_at: new Date().toISOString(),
+      });
+      console.log("[WEBHOOK] Deactivated:", email);
+      return res.status(200).json({ ok: true, active: false });
+    }
 
-    return res.status(200).json({
-      ok: true,
-      email,
-      event,
-      active,
-    });
+    // Evento não mapeado: não quebra, só loga.
+    console.log("[WEBHOOK] Unhandled event:", event, "Email:", email);
+    return res.status(200).json({ ok: true, ignored: true, event });
   } catch (err) {
     console.error("[WEBHOOK] ERROR:", err);
     return res.status(500).json({ ok: false, error: "Internal error" });
