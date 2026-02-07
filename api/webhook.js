@@ -1,39 +1,73 @@
+// api/webhook.js
 export default async function handler(req, res) {
-  // LastLink vai chamar via POST
+  // Só aceita POST
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
   try {
     const body = req.body || {};
 
-    // DEBUG: veja o que chega (aparece em Vercel > Logs)
-    console.log("[WEBHOOK] Received:", JSON.stringify(body));
-
-    // Tenta achar email em campos comuns
+    // ✅ LastLink (payload que você mostrou)
     const email =
-      body?.customer?.email ||
+      body?.Data?.Buyer?.Email ||
+      body?.data?.buyer?.email ||
       body?.buyer?.email ||
-      body?.user?.email ||
-      body?.email ||
-      body?.data?.customer?.email ||
-      body?.data?.buyer?.email;
+      body?.email;
 
     if (!email) {
+      console.log("[WEBHOOK] Received:", JSON.stringify(body));
       console.log("[WEBHOOK] No email found");
-      return res.status(400).json({ ok: false, error: "Email not found in payload" });
+      return res.status(400).json({ ok: false, error: "No email found" });
     }
 
-    // Status do evento (vamos ajustar pra LastLink depois)
-    // Por enquanto: qualquer evento recebido "marca ativo true"
-    // (só pra testar o fluxo end-to-end)
-    const active = true;
+    const event = body?.Event || body?.event || "";
 
-    // Aqui você faria: salvar em banco/kv/planilha
-    // Por enquanto só loga:
-    console.log(`[WEBHOOK] email=${email} -> active=${active}`);
+    // Regra simples:
+    // - eventos de aprovação/assinatura ativa = ativa
+    // - eventos de reembolso/cancelamento/chargeback = desativa
+    const deactivateEvents = new Set([
+      "Refund_Period_Over",
+      "Refunded",
+      "Chargeback",
+      "Chargeback_Started",
+      "Subscription_Canceled",
+      "Subscription_Expired",
+      "Subscription_Suspended",
+      "Subscription_Payment_Failed",
+    ]);
 
-    return res.status(200).json({ ok: true, email, active });
+    const activateEvents = new Set([
+      "Purchase_Approved",
+      "Subscription_Activated",
+      "Subscription_Renewed",
+      "Payment_Confirmed",
+    ]);
+
+    let active = null;
+
+    if (deactivateEvents.has(event)) active = false;
+    if (activateEvents.has(event)) active = true;
+
+    // Se não reconhecer o evento, só loga e responde OK (pra não travar)
+    if (active === null) {
+      console.log("[WEBHOOK] Unhandled event:", event, "Email:", email);
+      return res.status(200).json({ ok: true, received: true, email, event });
+    }
+
+    // ✅ Aqui é o ponto: você liga/desliga o usuário.
+    // Como você está validando por email no /api/validate, o ideal é salvar em algum "banco".
+    // (se estiver usando JSON/arquivo simples por enquanto, troca aqui).
+    //
+    // Por enquanto, só confirmando que chegou certo:
+    console.log("[WEBHOOK] Email:", email, "Event:", event, "Set active:", active);
+
+    return res.status(200).json({
+      ok: true,
+      email,
+      event,
+      active,
+    });
   } catch (err) {
     console.error("[WEBHOOK] ERROR:", err);
     return res.status(500).json({ ok: false, error: "Internal error" });
